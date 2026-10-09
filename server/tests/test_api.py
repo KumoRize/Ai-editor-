@@ -38,7 +38,8 @@ def test_full_workflow(client, media):
     res = j["result"]
     assert (res["width"], res["height"]) == (720, 1280)
     assert res["duration"] == pytest.approx(6, abs=0.3)
-    assert any("subtitle" in u for u in res["unsupported_requests"])
+    # speech recognition is disabled in tests, so subtitles are honestly reported as not possible
+    assert any("subtitles" in u for u in res["unsupported_requests"])
     assert all(s["status"] in ("done", "skipped") for s in j["steps"])
     assert "output_file" not in res
 
@@ -68,7 +69,8 @@ def test_upload_rejections(client, media, tmp_path):
     assert r.status_code == 413 and "too large" in r.json()["error"]["message"]
     assert not any((config.get_settings().data_dir / "uploads").iterdir())  # nothing left behind
     assert client.post("/api/uploads?filename=x.mp4", content=b"").status_code == 400
-    assert client.post("/api/uploads?filename=x.mp4&role=music", content=b"x").status_code == 400
+    assert client.post("/api/uploads?filename=x.mp4&role=bogus", content=b"x").status_code == 400
+    assert client.post("/api/uploads?filename=x.txt&role=music", content=b"x").status_code == 415
 
 
 def test_job_validation(client, media):
@@ -79,6 +81,8 @@ def test_job_validation(client, media):
         {"asset_ids": [a["asset_id"]], "resolution": "4k"},
         {"asset_ids": [a["asset_id"]], "preset": "instagram_reels", "duration": 500},
         {"asset_ids": [a["asset_id"], "a_other"]},
+        {"asset_ids": [a["asset_id"]], "music_asset_id": a["asset_id"]},      # a clip is not a music file
+        {"asset_ids": [a["asset_id"]], "reference_asset_id": "a_missing"},
         {"asset_ids": [a["asset_id"]], "fit": "stretch"},
     ]
     for body in bad:

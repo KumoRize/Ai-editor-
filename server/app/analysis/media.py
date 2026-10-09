@@ -218,3 +218,63 @@ def analyze_video(path: Path, sha256: str, meta: dict) -> dict:
     tmp.write_text(json.dumps(result))
     tmp.replace(cfile)
     return result
+
+
+# ----------------------------------------------------------------------------- audio (music / sound effects)
+AUDIO_CONTAINERS = ("mp3", "mov", "mp4", "m4a", "wav", "ogg", "matroska", "webm", "aac", "flac")
+
+
+def validate_audio(path: Path, meta: dict) -> None:
+    s = get_settings()
+    names = set((meta.get("format_name") or "").split(","))
+    if not names.intersection(AUDIO_CONTAINERS):
+        raise unsupported_format("That audio format isn't supported. Use MP3, M4A, WAV, AAC, OGG or FLAC.")
+    if not meta.get("has_audio"):
+        raise unsupported_format("This file has no sound.")
+    if meta["duration"] < 1.0:
+        raise EditorError("TOO_SHORT", "This audio is too short (under 1 s).")
+    if meta["duration"] > 30 * 60:
+        raise EditorError("TOO_LONG", "This audio is too long (limit 30 minutes).")
+    cp = run([s.ffmpeg_bin, "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0", "-t", "2",
+              "-f", "null", "-"], timeout=60)
+    if cp.returncode != 0:
+        raise unsupported_format("That audio format isn't supported (it could not be decoded).")
+
+
+def analyze_music(path: Path, sha256: str, meta: dict) -> dict:
+    """Tempo, beats, downbeats and a 1 s energy envelope; cached."""
+    from .beats import analyze_beats
+
+    cfile = cache_dir(sha256) / "music_v2.json"
+    if cfile.exists():
+        try:
+            return json.loads(cfile.read_text())
+        except json.JSONDecodeError:
+            cfile.unlink(missing_ok=True)
+    res = analyze_beats(path)
+    tmp = cfile.with_suffix(".tmp")
+    tmp.write_text(json.dumps(res))
+    tmp.replace(cfile)
+    return res
+
+
+# ----------------------------------------------------------------------------- frames / thumbnails
+def extract_frames(path: Path, sha256: str, times: list[float], width: int = 256) -> list[Path]:
+    """JPEG frames at the given source times (cached)."""
+    s = get_settings()
+    out: list[Path] = []
+    d = cache_dir(sha256) / "frames"
+    d.mkdir(exist_ok=True)
+    for t in times[:24]:
+        f = d / f"{int(round(t * 1000))}_{width}.jpg"
+        if not f.exists():
+            cp = run([s.ffmpeg_bin, "-nostdin", "-v", "error", "-y", "-ss", f"{max(0.0, t):.3f}", "-i", str(path),
+                      "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "4", str(f)], timeout=60)
+            if cp.returncode != 0 or not f.exists():
+                raise EditorError("FRAME_FAILED", f"Could not extract a frame at {t:.2f}s.")
+        out.append(f)
+    return out
+
+
+def thumbnail(path: Path, sha256: str, duration: float) -> Path:
+    return extract_frames(path, sha256, [min(1.0, duration * 0.1)], width=240)[0]

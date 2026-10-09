@@ -110,7 +110,7 @@ def test_prompt_mode_end_to_end(client, media):
     # Form fields say 16:9/1080p/60s; in prompt mode they must be ignored in favour of the prompt.
     body = {"mode": "prompt", "asset_ids": [a["asset_id"]], "preset": "youtube_landscape", "resolution": "1080p",
             "duration": 60, "fit": "cover",
-            "prompt": "Square 720p video with black bars. Use 0:01-0:03 then 0:08-0:11, mute it, add subtitles."}
+            "prompt": "Square 720p video with black bars. Use 0:01-0:03 then 0:08-0:11, mute it, stabilize it."}
     job = client.post("/api/jobs", json=body).json()
     done = jobs.wait_for(job["job_id"], 180)
     assert done["status"] == "complete", done["error"]
@@ -118,7 +118,7 @@ def test_prompt_mode_end_to_end(client, media):
     assert (r["width"], r["height"]) == (720, 720) and r["duration"] == pytest.approx(5.0, abs=0.05)
     assert r["settings"]["fit"] == "contain" and r["mode"] == "prompt"
     assert r["notes"][0].startswith("Understood your prompt as: Square post · 1:1 · 720p")
-    assert any("subtitles" in u for u in r["unsupported_requests"])
+    assert any("stabilis" in u for u in r["unsupported_requests"])
     # The output really is silent (original sound muted).
     import subprocess
     from pathlib import Path

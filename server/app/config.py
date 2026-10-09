@@ -44,6 +44,8 @@ class Settings:
     render_timeout_s: int = field(default_factory=lambda: _int("RENDER_TIMEOUT_S", 30 * 60))
     analysis_timeout_s: int = field(default_factory=lambda: _int("ANALYSIS_TIMEOUT_S", 10 * 60))
     worker_threads: int = field(default_factory=lambda: _int("WORKER_THREADS", 1))
+    # Pieces rendered at the same time inside one job (each FFmpeg uses ~0.4 GB at 1080p).
+    render_parallel: int = field(default_factory=lambda: _int("RENDER_PARALLEL", max(1, min(3, (os.cpu_count() or 2) // 2))))
     x264_preset: str = field(default_factory=lambda: os.environ.get("X264_PRESET", "veryfast"))
 
     # AI planner. LLM_PROVIDER = auto | anthropic | openai | rules

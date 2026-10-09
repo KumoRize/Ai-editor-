@@ -41,6 +41,16 @@ def media(tmp_path_factory) -> dict[str, Path]:
     return out
 
 
+@pytest.fixture(autouse=True)
+def no_speech_model(monkeypatch):
+    """Tests never download a speech model; tests that need speech install a fake transcriber."""
+    from app.analysis import transcribe
+    monkeypatch.setenv("TRANSCRIBE", "0")
+    monkeypatch.setattr(transcribe, "_model", None)
+    monkeypatch.setattr(transcribe, "_model_error", None)
+    monkeypatch.setattr(transcribe, "_override", None)
+
+
 @pytest.fixture()
 def settings(tmp_path):
     s = config.reset_settings(data_dir=tmp_path / "data", access_token="", llm_provider="rules")

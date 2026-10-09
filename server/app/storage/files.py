@@ -128,9 +128,9 @@ def cleanup_expired(protected_paths: set[Path] | None = None) -> dict:
         if d.resolve() not in protected and expired(d, s.render_retention_h):
             shutil.rmtree(d, ignore_errors=True)
             removed["jobs"] += 1
-    for d in (s.data_dir / "tmp").glob("*"):
-        if expired(d, s.tmp_retention_h):
-            shutil.rmtree(d, ignore_errors=True) if d.is_dir() else d.unlink(missing_ok=True)
+    for f in (s.data_dir / "tmp").rglob("*"):  # by each file's own age (active uploads keep growing)
+        if f.is_file() and expired(f, s.tmp_retention_h):
+            f.unlink(missing_ok=True)
             removed["tmp"] += 1
     # analysis cache follows upload retention (it is cheap to recompute)
     # analysis results and rendered segments (cache/<xx>/<sha>/, cache/segments/<key>.mov)

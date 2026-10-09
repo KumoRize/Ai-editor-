@@ -16,6 +16,7 @@
     <h1>AI Video Editor</h1>
     <span id="planner" class="pill" hidden></span>
   </header>
+  <p id="offline" class="notice" hidden>You're offline. Uploads and edits continue when the connection is back.</p>
 
   <!-- Access code (only shown when the server requires one) -->
   <section id="view-login" class="card" hidden>
@@ -39,39 +40,45 @@
       </div>
 
       <div class="card">
-        <label class="label" for="file-clip">Upload media</label>
+        <span class="label">Upload media <em id="clip-count"></em></span>
         <label class="drop" for="file-clip">
-          <input id="file-clip" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm">
-          <span id="drop-text">Tap to choose a video (MP4, MOV, WEBM)</span>
+          <input id="file-clip" type="file" multiple accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm">
+          <span>Tap to add videos (MP4, MOV, WEBM)</span>
         </label>
-        <div id="upload-status" class="upload" hidden>
-          <div class="row"><span id="upload-name" class="ellipsis"></span><span id="upload-pct"></span></div>
-          <div class="bar"><div id="upload-bar"></div></div>
-          <p id="upload-info" class="muted"></p>
-          <p id="upload-error" class="error" hidden></p>
-        </div>
-        <p class="muted small">One clip per edit for now. Combining several clips arrives in Phase 2.</p>
+        <ul id="clip-list" class="files"></ul>
+        <p class="muted small">Clips are used in this order. Use ↑ ↓ to reorder.</p>
       </div>
 
       <div class="card">
-        <div class="unavailable">
-          <span class="label">Reference video <em>(optional)</em></span>
-          <span class="pill soon">Coming in Phase 3</span>
-        </div>
-        <div class="unavailable">
-          <span class="label">Music <em>(optional)</em></span>
-          <span class="pill soon">Coming in Phase 2</span>
-        </div>
+        <span class="label">Reference video <em>(optional — style and pacing only)</em></span>
+        <label class="drop slim" for="file-ref">
+          <input id="file-ref" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm">
+          <span>Add a video whose style you like</span>
+        </label>
+        <ul id="ref-list" class="files"></ul>
+        <span class="label top-gap">Music <em>(optional)</em></span>
+        <label class="drop slim" for="file-music">
+          <input id="file-music" type="file" accept="audio/*,.mp3,.m4a,.wav,.aac,video/mp4,.mp4,.mov">
+          <span>Add a song (MP3, M4A, WAV)</span>
+        </label>
+        <ul id="music-list" class="files"></ul>
       </div>
 
       <div class="card">
         <div class="row"><label class="label" id="prompt-label" for="prompt">Prompt</label>
-          <button type="button" id="example-btn" class="chip" hidden>Use an example</button></div>
-        <textarea id="prompt" rows="4" maxlength="2000"></textarea>
-        <p id="prompt-help" class="muted small" hidden>The agent can: pick the platform, aspect ratio (9:16, 16:9, 1:1),
-          length, 720p/1080p, framing (crop, blurred background, black bars), use exact times
-          (“0:05–0:12”, “first 10 seconds”), remove silent parts, and mute or change the volume.
-          Anything else you ask for is listed as “not applied yet”.</p>
+          <button type="button" id="example-btn" class="chip">Use an example</button></div>
+        <textarea id="prompt" rows="4" maxlength="4000"></textarea>
+        <details class="help">
+          <summary>What can the agent do?</summary>
+          <p class="muted small">Cuts from the best moments or exact times (“0:05–0:12”, “first 10 seconds”),
+            remove silent parts, combine clips, speed changes, slow-motion and speed ramps, zooms / Ken Burns /
+            punch-ins, transitions (dissolve, fade, wipe, slide…), colour looks (warm, cool, cinematic, black &amp;
+            white, vintage, vibrant, moody), vignette / grain / sharpen, subtitles from speech<span id="speech-note"></span>,
+            titles in quotes (“Summer 2026”), music with beat-synced cuts and automatic ducking, sound effects
+            (whoosh, impact, pop…), fade in/out, mute or volume, and copying the pacing/style of a reference video.
+            In Full prompt mode it also picks platform, aspect ratio, length, resolution and framing.
+            Anything it can't do is listed as “not applied”.</p>
+        </details>
       </div>
 
       <div class="card grid" id="settings-card">
@@ -107,6 +114,7 @@
     <h2 id="progress-title">Working on your edit…</h2>
     <div class="bar big"><div id="job-bar"></div></div>
     <ol id="steps" class="steps"></ol>
+    <p class="muted small">You can close this page — the edit keeps going on the server.</p>
     <div id="job-error" class="error-box" hidden>
       <p id="job-error-msg"></p>
       <div class="row gap">
@@ -127,7 +135,12 @@
       <div id="result-unsupported" class="notice" hidden></div>
       <div id="result-notes" class="notice" hidden></div>
       <a id="download-btn" class="button primary big" href="#" download>Download MP4</a>
+      <button id="share-btn" class="big" type="button" hidden>Share</button>
       <button id="again-btn" class="big" type="button">Edit again</button>
+      <details class="help" id="details">
+        <summary>Edit details</summary>
+        <div id="details-body" class="small"></div>
+      </details>
       <button id="new-btn" class="link" type="button">Start a new edit</button>
     </div>
   </section>

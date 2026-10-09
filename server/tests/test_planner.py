@@ -36,11 +36,12 @@ def test_short_source_uses_whole_clip():
 
 
 def test_unsupported_detection():
-    found = detect_unsupported("Add subtitles, beat-synced cuts, zooms and music like the reference")
+    found = detect_unsupported("Stabilize it, add a green screen, a voice-over and some emojis")
     joined = " ".join(found)
-    for word in ("subtitles", "beat", "zoom", "music", "reference"):
+    for word in ("stabilis", "green screen", "voice-over", "emojis"):
         assert word in joined
-    assert detect_unsupported("just cut the boring parts") == []
+    # everything below is supported now
+    assert detect_unsupported("subtitles, zooms, beat-synced cuts, music, transitions, warm colour, whooshes") == []
 
 
 def test_validate_plan_catches_bad_segments():

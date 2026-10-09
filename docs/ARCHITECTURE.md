@@ -1,6 +1,6 @@
 # AI Video Editor Agent — Architecture
 
-Status: **Phase 1 implemented** (see §15 for what changed during implementation).
+Status: **Phases 1–6 implemented** (see §15–16 for what changed during implementation).
 
 This document fixes the architecture, the editing-engine choice, the data
 contracts (timeline / edit plan), the tool surface the AI model uses, and the
@@ -442,3 +442,86 @@ What was built, and the decisions that changed while testing it:
   note. In both modes, explicit instructions are followed literally:
   time ranges, first/last N seconds, remove silence, and original-audio volume (via `set_volume`).
   The result says how the prompt was understood.
+
+---
+
+## 16. Phases 2–6 implementation notes
+
+**Timeline model (engine v2, `engine/timeline.py`).**
+- **Main track (V1):** magnetic. A clip's `transition_in` overlaps it with the previous clip.
+- **Overlay tracks (V2+):** picture-in-picture clips at explicit times.
+- **Audio tracks (A1+):** music and sound effects at explicit times.
+- **Text track:** captions and titles in timeline time.
+- **Per-clip settings:** speed, volume, zoom keyframes stored as fractions of the clip (so they survive
+  trims, splits and ramps), colour preset and adjustments, effects, crop, rotation.
+- **Atomic operations:** every operation (26 of them) is wrapped by `@atomic`, so a failure always
+  leaves the timeline exactly as it was. Tests found a case where it didn't before.
+
+**Rendering (`engine/compiler.py`, `render/runner.py`).**
+- **Pieces:** the main track is split into *pieces*. Each clip body is one piece, and each transition is
+  one piece (`xfade` on the tail of A and head of B, plus `acrossfade`). No piece needs more than two
+  main inputs, so memory stays bounded.
+- **Inside each piece:** captions and titles (libass, from a generated ASS file with override
+  characters neutralised), picture-in-picture overlays, and intro/outro fades.
+- **Caching:** each piece is cached by a hash of its full recipe, so changing one caption re-renders
+  only the pieces under it.
+- **Parallelism:** pieces render in parallel (`RENDER_PARALLEL`).
+- **Final pass:** video is stream-copied. Audio = original + looped/faded music, side-chain ducked under
+  the original sound, + sound effects, then `loudnorm` to −14 LUFS and a limiter.
+
+**Analysis.**
+- **Beats (`analysis/beats.py`):** plain numpy. Spectral flux in full and low (kick) bands,
+  autocorrelation tempo with a 120 BPM prior, dynamic-programming beat tracking, off-beat correction and
+  a measured 70 ms onset-latency correction. Phase error is about 6 ms on test tracks.
+- **Speech (`analysis/transcribe.py`):** faster-whisper with word timestamps. Words are mapped through
+  the clips' source→timeline times into readable caption chunks. If the model can't load, this is
+  reported as unavailable up front.
+- **Reference (`analysis/reference.py`):** a 4 fps, 96 px proxy measures:
+  - shots and the pacing curve
+  - gradual transitions (a frame that is a blend of two clearly different neighbours) and fades
+  - zoom per shot (blurred, normalised scale search; both halves of the shot must agree)
+  - motion
+  - caption bands (bright, persistent edges)
+  - beat alignment of cuts compared with chance
+  - colour, mapped to a preset
+
+  Low-confidence measurements are labelled.
+- **Sound effects (`analysis/sfx.py`):** synthesised by FFmpeg, so there is nothing to license.
+
+**Planning.**
+- **Shared plan schema:** the built-in planner and the LLM produce the same `EditPlan` schema
+  (segments with speed/ramp/zoom/transition, colour, effects, captions, titles, music/beat sync,
+  sound effects, intro/outro), validated before execution.
+- **Built-in planner:** reads the prompt, the reference profile and the beat grid. Shot lengths become
+  whole beats when syncing. Extra source is picked to cover transition overlaps.
+- **Applying the plan:** core cuts are one transaction. Each creative step that fails is reported as
+  "Not applied — …" and the rest continues.
+- **Summary:** for the built-in planner it is generated from the final timeline, so it never claims
+  something that isn't in the video.
+
+**Agent & MCP.**
+- **Tool loop:** `agent_loop.py` runs a provider-neutral loop (`provider.chat`, Anthropic and
+  OpenAI-compatible adapters; Claude's reasoning blocks are passed back unchanged). It is used for
+  "Edit again" when an AI model is configured.
+- **MCP server:** `mcp_server.py` exposes the same tools over streamable HTTP at `/mcp/`, on persistent
+  *projects* (`agent/projects.py`). Rendering runs as a job.
+- **Auth:** the access token, also accepted as a Bearer token.
+
+**Self-verification.** `render/quality.py` decodes the output once and measures black sections,
+frozen picture, integrated loudness and true peak. It compares them with what the timeline intends
+(fades to black, muted clips). Fixable problems (clipping, too quiet) trigger one repair render, which
+is cheap because only the final mix is redone.
+
+**Mobile.**
+- Chunked uploads (`/api/uploads/init`, `PUT ?offset=`, `/complete`) resume after network drops or page
+  reloads. A wrong offset returns 409 with the position to continue from.
+- Chunk size and the number of pending uploads are bounded.
+- Thumbnails and frames are served from the cache.
+- The service worker caches only the app shell, never API responses or videos.
+
+**Still heuristic / limited.**
+- Reference measurements of speed changes and captions (low confidence).
+- Beat tracking can lock to half or double tempo on unusual music. Cuts still land on beats.
+- Speed ramps are stepped, not continuous curves.
+- PiP overlays are silent.
+- One project timeline per MCP project.

@@ -15,27 +15,39 @@ log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are the planning component of a video editing system. You receive a user's \
 editing request and a JSON summary of their uploaded footage (durations, detected scene cuts, an \
-audio loudness envelope, silent ranges). You return an edit plan: an ordered list of source \
-segments that will be played back to back, plus a short summary for the user.
+audio loudness envelope, silent ranges, optional speech transcript), optional music (tempo and beat \
+times), and an optional style profile measured from a reference video. You return an edit plan that \
+the system executes exactly.
 
-Operations available right now: choosing segments (cuts/trims), ordering them, removing silent \
-parts (by leaving them out), and the volume of the clip's own sound (original_audio_volume: 0 mutes \
-it, 1 keeps it, up to 2 is louder). Nothing else is available yet. List every part of the request \
-that needs an unavailable operation (for example subtitles, music, text, zooms, speed changes, \
-transitions, colour, sound effects, reference matching) in unsupported_requests, using a few words \
-each. Never pretend those will be applied.
+Available operations:
+- segments: ordered source ranges played back to back (cuts/trims; removing silent parts = leaving \
+them out). Per segment: speed (0.25-4), speed_ramp (stepped ramps that keep the segment's length), \
+zoom (in, out, punch_in, pan_left, pan_right, ken_burns) with zoom_amount, and transition_in from \
+the previous segment (fade, dissolve, fadeblack, fadewhite, wipes, slides, circleopen, zoomin, ...). \
+A transition overlaps the two segments by transition_duration, which shortens the video.
+- original_audio_volume (0 mutes the clips' own sound), color_preset, effects for the whole video.
+- captions.mode "speech" burns in subtitles of what is said (only if speech_recognition is available).
+- texts: title overlays at output-timeline seconds. sound_effects: built-in effects at output seconds; \
+sfx_on_transitions adds a whoosh at every transition. intro/outro: fade in/out of the whole video.
+- music (only if a music file was uploaded): volume, duck (lower it under speech), beat_sync (cuts are \
+snapped to the beat afterwards), start_at (seconds into the song, -1 = first beat).
+List every part of the request that none of these can do in unsupported_requests (a few words each). \
+Never pretend those will be applied.
 
 Rules:
-- Use only the asset_id values provided. Times are in seconds of the source file.
+- Use only the asset_id values provided. Times in segments are seconds of the source file.
 - If the user gives exact times or ranges (e.g. "0:05-0:12", "first 10 seconds"), use exactly \
 those, in the order given, clamped to the clip length; then the target duration does not apply.
-- 0 <= src_in < src_out <= asset duration. Each segment at least 0.4 s long.
-- The sum of (src_out - src_in) should equal the target duration (within 5%), unless the footage \
-is shorter, in which case use the footage you have.
+- 0 <= src_in < src_out <= asset duration. Each segment at least 0.4 s of output.
+- The output length is sum((src_out - src_in) / speed) minus transition durations; it should equal \
+the target duration (within 5%) unless the footage is shorter.
 - Prefer starting segments on scene cuts, avoid silent ranges when audio matters, prefer louder / \
-more active moments, and keep chronological order unless the user asks otherwise.
-- Fast-paced requests: segments around 0.8–1.8 s. Calm requests: 3–6 s. Otherwise ~2–3 s.
-- Avoid using the same source moment twice.
+more active moments, keep chronological order unless asked otherwise, never reuse a moment.
+- Fast-paced requests: segments around 0.8-1.8 s. Calm requests: 3-6 s. Otherwise ~2-3 s. With \
+beat_sync, make segment lengths whole numbers of beats.
+- With a reference style profile, match its pacing (target_shot_length), transitions, zoom frequency, \
+colour and caption placement — it is style inspiration only; its footage is never used.
+- Use effects only when asked for or implied by the reference; keep it tasteful.
 - The summary is one plain sentence for a non-technical user; no internal reasoning."""
 
 
@@ -61,7 +73,9 @@ black bars, otherwise "cover"."""
 
 
 def build_context(prompt: str, assets: dict[str, dict], analyses: dict[str, dict],
-                  target_duration: float | None, previous_plan: dict | None, prompt_mode: bool = False) -> str:
+                  target_duration: float | None, previous_plan: dict | None, prompt_mode: bool = False,
+                  extra: dict | None = None) -> str:
+    extra = extra or {}
     media = []
     for aid, a in assets.items():
         if a.get("role") != "clip":
@@ -84,6 +98,10 @@ def build_context(prompt: str, assets: dict[str, dict], analyses: dict[str, dict
                                      "values": per_s},
             "silent_ranges": audio.get("silent_ranges", [])[:50],
         })
+        tr = (extra.get("transcripts") or {}).get(aid)
+        if tr:
+            media[-1]["speech"] = [{"start": sg["start"], "end": sg["end"], "text": sg["text"][:200]}
+                                   for sg in tr.get("segments", [])[:120]]
     ctx = {"user_request": prompt, "media": media}
     if prompt_mode:
         ctx["presets"] = {k: {"aspect_ratio": v["aspect_ratio"], "default_duration_s": v["default_duration"],
@@ -91,6 +109,20 @@ def build_context(prompt: str, assets: dict[str, dict], analyses: dict[str, dict
         ctx["framing_options"] = FITS
     else:
         ctx["target_duration_s"] = target_duration
+    ctx["speech_recognition_available"] = bool(extra.get("speech_available"))
+    mus = extra.get("music")
+    if mus:
+        an = mus["analysis"]
+        ctx["music"] = {"duration": an.get("duration"), "tempo_bpm": an.get("tempo"),
+                        "beat_times": an.get("beats", [])[:240], "first_beat": (an.get("beats") or [0])[0],
+                        "energy_db_per_second": _downsample(an.get("energy_db", []), 240)}
+    else:
+        ctx["music"] = None
+    if extra.get("reference"):
+        ref = extra["reference"]
+        ctx["reference_style"] = {k: ref.get(k) for k in ("aspect_ratio", "shots", "transitions", "zoom", "captions",
+                                                           "color", "style")}
+        ctx["reference_style"]["audio"] = {k: v for k, v in (ref.get("audio") or {}).items() if k != "beats"}
     if previous_plan:
         ctx["previous_edit"] = {"note": "The user is revising this earlier edit. Apply their new request to it.",
                                 "segments": previous_plan.get("segments", [])[:120],
@@ -100,13 +132,14 @@ def build_context(prompt: str, assets: dict[str, dict], analyses: dict[str, dict
 
 def plan_with_llm(provider: LLMProvider, prompt: str, assets: dict[str, dict], analyses: dict[str, dict],
                   target_duration: float | None, max_duration: float, previous_plan: dict | None,
-                  max_calls: int, prompt_mode: bool = False) -> tuple[EditPlan, list[str], int]:
+                  max_calls: int, prompt_mode: bool = False,
+                  extra: dict | None = None) -> tuple[EditPlan, list[str], int]:
     """Return (plan, warnings, calls_used). Raises LLMError if no valid plan is produced.
 
     In prompt mode the model also picks the output settings; they are resolved
     (defaults + preset limits) into plan.settings and validated like everything else.
     """
-    user = build_context(prompt, assets, analyses, target_duration, previous_plan, prompt_mode)
+    user = build_context(prompt, assets, analyses, target_duration, previous_plan, prompt_mode, extra)
     system = SYSTEM_PROMPT + (PROMPT_MODE_ADDENDUM if prompt_mode else "")
     schema = PROMPT_MODE_SCHEMA if prompt_mode else PLAN_JSON_SCHEMA
     calls = 0
@@ -128,6 +161,8 @@ def plan_with_llm(provider: LLMProvider, prompt: str, assets: dict[str, dict], a
             raise
         try:
             plan = EditPlan.model_validate({k: v for k, v in data.items() if k != "settings"})
+            if plan.music.start_at is not None and plan.music.start_at < 0:
+                plan.music.start_at = None
             target, max_d = target_duration, max_duration
             if prompt_mode:
                 raw = data.get("settings") or {}

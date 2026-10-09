@@ -68,3 +68,20 @@ video { width: 100%; max-height: 70vh; background: #000; border-radius: 10px; ma
 .seg-btn.active { background: linear-gradient(90deg, var(--accent), var(--accent-2)); color: #fff; }
 #mode-hint { margin: 10px 2px 0; }
 .chip { min-height: 32px; padding: 4px 12px; font-size: 13px; font-weight: 500; border-radius: 99px; }
+.drop.slim { min-height: 56px; }
+.top-gap { margin-top: 14px; }
+.files { list-style: none; padding: 0; margin: 10px 0 0; }
+.file { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.file:last-child { border-bottom: 0; }
+.file img, .file .ph { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; background: #0c0e12; flex: none;
+  display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.file .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.file .meta .bar { margin: 4px 0 0; }
+.file .ctl { display: flex; gap: 4px; flex: none; }
+.file .ctl button { min-height: 40px; min-width: 40px; padding: 0 10px; }
+.file.error .ph { color: var(--err); }
+details.help { margin-top: 10px; }
+details.help summary { cursor: pointer; color: var(--muted); min-height: 32px; display: flex; align-items: center; }
+table.cuts { width: 100%; border-collapse: collapse; margin-top: 8px; }
+table.cuts th, table.cuts td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+#offline { margin-bottom: 12px; }

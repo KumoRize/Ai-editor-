@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from .agent.orchestrator import Reporter, initial_steps, load_previous_plan, run_edit_job
+from .agent.orchestrator import Reporter, initial_steps, load_previous, run_edit_job
 from .config import get_settings
 from .errors import EditorError
 from .storage import db
@@ -35,18 +35,23 @@ def _run_one(job: dict) -> None:
     push(steps, 0.0)
     try:
         assets = {}
-        for aid in req["asset_ids"]:
+        ids = list(req["asset_ids"]) + [x for x in (req.get("music_asset_id"), req.get("reference_asset_id")) if x]
+        for aid in ids:
             a = db.get_asset(aid)
             if a is None or not Path(a["path"]).is_file():
                 raise EditorError("ASSET_MISSING", "An uploaded file is no longer available. Please upload it again.")
             assets[aid] = a
-        previous = None
+        prev_plan = prev_tl = None
         if req.get("parent_job_id"):
             try:
-                previous = load_previous_plan(job_dir(req["parent_job_id"]))
+                prev_plan, prev_tl = load_previous(job_dir(req["parent_job_id"]))
             except EditorError:
-                previous = None
-        result = run_edit_job(job_id, req, assets, job_dir(job_id), reporter, previous)
+                prev_plan = prev_tl = None
+        if req.get("kind") == "render_timeline":
+            from .agent.projects import render_project_job
+            result = render_project_job(job_id, req, assets, job_dir(job_id), reporter)
+        else:
+            result = run_edit_job(job_id, req, assets, job_dir(job_id), reporter, prev_plan, prev_tl)
         db.update_job(job_id, status="complete", progress=1.0, result=result, error=None, steps=reporter.steps)
         log.info("job %s complete", job_id)
     except EditorError as e:

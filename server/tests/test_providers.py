@@ -117,3 +117,37 @@ def test_orchestrator_falls_back_honestly(settings, media, monkeypatch, tmp_path
     assert res["planner"] == "built-in rules"
     assert any("built-in planner" in n for n in res["notes"])
     assert (tmp_path / res["output_file"]).is_file()
+
+
+def test_anthropic_chat_tool_calls(monkeypatch):
+    block_tool = SimpleNamespace(type="tool_use", id="tu_1", name="add_zoom", input={"clip_id": "c1"},
+                                 model_dump=lambda **k: {"type": "tool_use", "id": "tu_1", "name": "add_zoom",
+                                                         "input": {"clip_id": "c1"}})
+    block_think = SimpleNamespace(type="thinking", model_dump=lambda **k: {"type": "thinking", "thinking": "",
+                                                                          "signature": "sig"})
+    resp = SimpleNamespace(stop_reason="tool_use", content=[block_think, block_tool])
+    p, seen = _anthropic(monkeypatch, resp)
+    out = p.chat(system="s", messages=[{"role": "user", "content": "hi"}],
+                 tools=[{"name": "add_zoom", "description": "d", "input_schema": {"type": "object"}}])
+    assert out["tool_calls"] == [{"id": "tu_1", "name": "add_zoom", "input": {"clip_id": "c1"}}]
+    assert seen["tools"][0]["name"] == "add_zoom" and "tool_choice" not in seen
+    # next turn: assistant blocks (incl. reasoning) are passed back unchanged, results as tool_result
+    p.chat(system="s", messages=[{"role": "user", "content": "hi"}, {"role": "assistant", "raw": out["raw"]},
+                                 {"role": "tool", "results": [{"id": "tu_1", "content": "ok"}]}], tools=[])
+    assert seen["messages"][1]["content"][0]["signature"] == "sig"
+    assert seen["messages"][2]["content"][0] == {"type": "tool_result", "tool_use_id": "tu_1", "content": "ok"}
+
+
+def test_openai_chat_tool_calls(monkeypatch):
+    sent = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        sent.update(json)
+        return httpx.Response(200, json={"choices": [{"message": {"content": None, "tool_calls": [
+            {"id": "call_1", "type": "function", "function": {"name": "trim_clip", "arguments": '{"clip_id": "c1"}'}}]}}]})
+    monkeypatch.setattr(httpx, "post", fake_post)
+    p = OpenAICompatProvider("k", "http://x/v1", "m")
+    out = p.chat(system="s", messages=[{"role": "user", "content": "go"}],
+                 tools=[{"name": "trim_clip", "description": "d", "input_schema": {"type": "object"}}])
+    assert out["tool_calls"] == [{"id": "call_1", "name": "trim_clip", "input": {"clip_id": "c1"}}]
+    assert sent["tools"][0]["function"]["name"] == "trim_clip" and sent["messages"][0]["role"] == "system"

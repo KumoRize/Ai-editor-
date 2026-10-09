@@ -37,6 +37,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
+CREATE TABLE IF NOT EXISTS projects (
+    project_id TEXT PRIMARY KEY,
+    asset_ids TEXT NOT NULL,
+    timeline TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -142,3 +149,35 @@ def claim_next_queued() -> dict | None:
             (time.time(), r["job_id"]),
         )
         return get_job(r["job_id"])
+
+
+def list_assets(limit: int = 50) -> list[dict]:
+    with _lock:
+        rows = conn().execute("SELECT * FROM assets ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return [_row(r, ("meta",)) for r in rows]
+
+
+# ---------------------------------------------------------------- projects (MCP / agent editing sessions)
+def insert_project(project_id: str, asset_ids: list[str]) -> None:
+    now = time.time()
+    with _lock:
+        conn().execute("INSERT INTO projects VALUES (?,?,?,?,?)", (project_id, json.dumps(asset_ids), None, now, now))
+
+
+def get_project(project_id: str) -> dict | None:
+    with _lock:
+        r = conn().execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone()
+    return _row(r, ("asset_ids", "timeline"))
+
+
+def update_project(project_id: str, *, timeline: dict | None = None, asset_ids: list[str] | None = None) -> None:
+    sets, vals = ["updated_at=?"], [time.time()]
+    if timeline is not None:
+        sets.append("timeline=?")
+        vals.append(json.dumps(timeline))
+    if asset_ids is not None:
+        sets.append("asset_ids=?")
+        vals.append(json.dumps(asset_ids))
+    vals.append(project_id)
+    with _lock:
+        conn().execute(f"UPDATE projects SET {', '.join(sets)} WHERE project_id=?", vals)

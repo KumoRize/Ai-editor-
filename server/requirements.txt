@@ -3,5 +3,9 @@ uvicorn==0.53.0
 pydantic==2.13.5
 httpx==0.28.1
 numpy==2.5.3
+# MCP server (/mcp/) for external agents
+mcp==2.2.0
+# Subtitles from speech (open source, CPU). The model downloads once on first use.
+faster-whisper==1.2.1
 # Optional: only needed when LLM_PROVIDER=anthropic (or auto with ANTHROPIC_API_KEY set)
 anthropic==1.12.1

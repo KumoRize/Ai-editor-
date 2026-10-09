@@ -61,3 +61,46 @@ class AnthropicProvider:
             raise LLMError("The AI planner returned malformed JSON.", retryable=True, detail=text[:500]) from e
         log.info("anthropic plan usage: in=%s out=%s", resp.usage.input_tokens, resp.usage.output_tokens)
         return data
+
+    def chat(self, *, system: str, messages: list[dict], tools: list[dict]) -> dict:
+        """One turn of a tool-using conversation.
+
+        Neutral message format: {"role": "user", "content": str} |
+        {"role": "assistant", "raw": [...]} | {"role": "tool", "results": [{"id", "content", "is_error"}]}.
+        Returns {"text", "tool_calls": [{"id", "name", "input"}], "raw": [...], "stop": str}.
+        Assistant content (including reasoning blocks) is passed back unchanged on later turns.
+        """
+        a = self._anthropic
+        api_msgs = []
+        for m in messages:
+            if m["role"] == "user":
+                api_msgs.append({"role": "user", "content": m["content"]})
+            elif m["role"] == "assistant":
+                api_msgs.append({"role": "assistant", "content": m["raw"]})
+            else:
+                api_msgs.append({"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": r["id"], "content": r["content"],
+                     **({"is_error": True} if r.get("is_error") else {})} for r in m["results"]]})
+        api_tools = [{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]}
+                     for t in tools]
+        try:
+            resp = self.client.beta.messages.create(
+                model=self.model, max_tokens=16000, system=system, messages=api_msgs, tools=api_tools,
+                output_config={"effort": self.effort}, betas=["server-side-fallback-2026-07-01"],
+                fallbacks="default")
+        except (a.AuthenticationError, a.PermissionDeniedError) as e:
+            raise LLMError("The AI agent is not configured correctly (API key rejected).", retryable=False,
+                           detail=str(e)) from e
+        except a.RateLimitError as e:
+            raise LLMError("The AI agent is busy (rate limited).", retryable=True, detail=str(e)) from e
+        except a.APIStatusError as e:
+            raise LLMError("The AI agent failed.", retryable=e.status_code >= 500, detail=str(e)) from e
+        except a.APIConnectionError as e:
+            raise LLMError("Could not reach the AI agent.", retryable=True, detail=str(e)) from e
+        if resp.stop_reason == "refusal":
+            raise LLMError("The AI agent declined this request.", retryable=False)
+        raw = [b.model_dump(exclude_none=True) for b in resp.content]
+        calls = [{"id": b.id, "name": b.name, "input": b.input} for b in resp.content
+                 if getattr(b, "type", "") == "tool_use"]
+        text = " ".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        return {"text": text, "tool_calls": calls, "raw": raw, "stop": resp.stop_reason}

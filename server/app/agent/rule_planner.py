@@ -1,10 +1,12 @@
 """Deterministic planner: works with no API key, used for tests, offline mode,
 and as an honest fallback when the LLM planner is unavailable.
 
-Strategy: decide a shot length from pacing words in the prompt, split the source
-into equal zones (keeps the story chronological and covers the whole video), and
-in each zone pick the window with the most audio energy, preferring windows that
-start on a scene cut and avoiding silence.
+Strategy: decide a shot length from the prompt, the reference video's pacing and
+the music's beat grid; split the source into equal zones (keeps the story
+chronological and covers the whole video) and in each zone pick the window with
+the most audio energy, preferring scene starts and avoiding silence. Then add the
+creative layer the prompt or reference asks for: transitions, zooms, speed
+ramps, colour, effects, subtitles, titles, music and sound effects.
 """
 from __future__ import annotations
 
@@ -12,37 +14,19 @@ import math
 import re
 
 from ..errors import EditorError
-from .plan import EditPlan, PlanSegment
+from .plan import EditPlan, PlanMusic, PlanSegment, PlanSfx, PlanText
 from .prompt_parser import Directives, fmt_t, parse_prompt
 
 MIN_PIECE = 0.3   # shortest piece kept when following explicit instructions (s)
 PAD = 0.15        # silence kept around speech when removing silent parts (s)
-
-# Requested features that are not implemented yet, mapped to the phase that adds them.
-UNSUPPORTED_KEYWORDS: list[tuple[str, str]] = [
-    (r"\b(subtitles?|captions?)\b", "subtitles/captions (Phase 2)"),
-    (r"\b(text overlay|title card|add text|lower third)\b", "text overlays (Phase 2)"),
-    (r"\b(music|song|soundtrack)\b", "background music (Phase 2)"),
-    (r"\b(reference|similar to|like this video|same style as)\b", "matching a reference video (Phase 3)"),
-    (r"\b(zoom|zooms|punch[- ]?in)\b", "zooms (Phase 4)"),
-    (r"\b(speed ramps?|slow[- ]?mo(tion)?|time[- ]?lapse|speed up|slow down)\b", "speed changes (Phase 4)"),
-    (r"\b(transitions?|crossfade|dissolve|wipe)\b", "transitions (Phase 4)"),
-    (r"\b(beat[- ]?sync(ed)?|on the beat|beats?)\b", "beat-synced cuts (Phase 4)"),
-    (r"\b(sound effects?|sfx|whoosh)\b", "sound effects (Phase 4)"),
-    (r"\b(colou?r grad(e|ing)|filter|lut|warm(er)? look|cinematic look)\b", "color grading (Phase 4)"),
-]
 
 FAST_WORDS = r"\b(fast|quick|rapid|energetic|energy|hype|dynamic|snappy|punchy|tiktok style)\b"
 SLOW_WORDS = r"\b(slow|calm|relax(ed|ing)?|chill|gentle|long takes?|vlog)\b"
 
 
 def detect_unsupported(prompt: str) -> list[str]:
-    p = prompt.lower()
-    found = []
-    for pattern, label in UNSUPPORTED_KEYWORDS:
-        if re.search(pattern, p) and label not in found:
-            found.append(label)
-    return found
+    """Parts of a prompt that no available operation can do."""
+    return parse_prompt(prompt).unsupported
 
 
 def shot_length_for(prompt: str) -> float:
@@ -130,7 +114,9 @@ def _explicit_segments(d: Directives, assets: dict[str, dict], analyses: dict[st
     """Segments the prompt asked for literally (time ranges, first/last N s, remove silence)."""
     if not (d.ranges or d.first_s or d.last_s or d.remove_silence):
         return None
-    aid = clip_ids[0]  # Phase 1: one clip per edit
+    aid = clip_ids[0]  # times in a prompt refer to the first clip
+    if len(clip_ids) > 1 and (d.ranges or d.first_s or d.last_s):
+        notes.append("Times in your prompt were applied to the first clip.")
     dur = float(assets[aid]["meta"]["duration"])
     pieces: list[tuple[float, float, str]] = []
     for a, b in d.ranges:
@@ -175,65 +161,201 @@ def _explicit_segments(d: Directives, assets: dict[str, dict], analyses: dict[st
             for a, b, why in pieces if b - a >= MIN_PIECE]
 
 
+def _median_interval(beats: list[float]) -> float:
+    if len(beats) < 3:
+        return 0.0
+    diffs = sorted(b - a for a, b in zip(beats, beats[1:]))
+    return diffs[len(diffs) // 2]
+
+
 def plan_rules(prompt: str, assets: dict[str, dict], analyses: dict[str, dict],
                target_duration: float | None, directives: Directives | None = None,
-               max_duration: float | None = None) -> EditPlan:
-    """target_duration None = keep everything the prompt selected (no length target)."""
+               max_duration: float | None = None, reference: dict | None = None,
+               music: dict | None = None) -> EditPlan:
+    """target_duration None = keep everything the prompt selected (no length target).
+
+    reference: style profile of a reference video (style only, footage never used).
+    music: {"asset_id", "analysis": {"beats", "tempo", ...}} for an uploaded song.
+    """
     d = directives or parse_prompt(prompt)
+    style = (reference or {}).get("style", {})
     notes: list[str] = list(d.notes)
+    unsupported = list(d.unsupported)
     clip_ids = [aid for aid, a in assets.items() if a.get("role") == "clip"]
     total_src = sum(float(assets[a]["meta"]["duration"]) for a in clip_ids)
     volume = 1.0 if d.volume is None else d.volume
+    speed = d.speed or 1.0
+    beats = (music or {}).get("analysis", {}).get("beats", []) if music else []
+    beat_iv = _median_interval(beats)
+    beat_sync = bool((d.beat_sync or style.get("beat_sync")) and beat_iv)
+    if d.beat_sync and not music:
+        unsupported.append("beat-synced cuts (upload a music file to sync to)")
+    if d.music and not music:
+        unsupported.append("background music (no music file was uploaded)")
 
+    # ---- pacing
+    if d.pacing == "fast":
+        shot = 1.3
+    elif d.pacing == "slow":
+        shot = 3.5
+    elif style.get("target_shot_length"):
+        shot = min(8.0, max(0.5, float(style["target_shot_length"])))
+    else:
+        shot = 2.2
+    if beat_sync:
+        k = max(1, round(shot / beat_iv))
+        if beat_iv * k < 0.45:
+            k += 1
+        shot = beat_iv * k
+
+    # ---- transitions
+    trans_type = d.transition
+    trans_every = 1
+    if not trans_type and style.get("transition_type") and style.get("transition_ratio", 0) >= 0.25:
+        trans_type = style["transition_type"]
+        trans_every = max(1, round(1 / style["transition_ratio"]))
+    trans_d = min(0.5, round(0.35 * shot, 2)) if trans_type else 0.0
+
+    # ---- segments
     explicit = _explicit_segments(d, assets, analyses, clip_ids, notes)
     if explicit is not None:
         if not explicit:
             raise EditorError("PROMPT_TIMES_INVALID", "Nothing was left to use after following your prompt.")
         limit = min(x for x in (target_duration, max_duration) if x) if (target_duration or max_duration) else None
-        total = sum(sg.src_out - sg.src_in for sg in explicit)
+        if speed != 1.0:
+            explicit = [sg.model_copy(update={"speed": speed}) for sg in explicit]
+        total = sum(sg.out_len for sg in explicit)
         if limit and total > limit + 0.05:  # shorten from the end to fit the requested/allowed length
             kept, acc = [], 0.0
             for sg in explicit:
                 room = limit - acc
                 if room < MIN_PIECE:
                     break
-                if sg.src_out - sg.src_in > room:
-                    sg = sg.model_copy(update={"src_out": round(sg.src_in + room, 3)})
+                if sg.out_len > room:
+                    sg = sg.model_copy(update={"src_out": round(sg.src_in + room * sg.speed, 3)})
                 kept.append(sg)
-                acc += sg.src_out - sg.src_in
+                acc += sg.out_len
             notes.append(f"Your selection was {total:.1f}s, so it was shortened to {limit:g}s.")
             explicit = kept
-        total = sum(sg.src_out - sg.src_in for sg in explicit)
-        summary = f"Followed your prompt: {len(explicit)} part(s), {total:.1f}s total."
-        return EditPlan(summary=summary, segments=explicit, unsupported_requests=detect_unsupported(prompt),
-                        original_audio_volume=volume, notes=notes)
-
-    target = min(target_duration or total_src, total_src)
-    shot = shot_length_for(prompt)
-    segments: list[PlanSegment] = []
-    if target >= total_src - 0.05:
-        for aid in clip_ids:
-            d = float(assets[aid]["meta"]["duration"])
-            segments.append(PlanSegment(asset_id=aid, src_in=0.0, src_out=round(d, 3), reason="full clip"))
-        summary = f"Used the full {total_src:.0f}s of footage (it is not longer than the requested length)."
+        segments = explicit
+        summary_cuts = f"{len(segments)} part(s) from your prompt"
     else:
+        target = min(target_duration or total_src / speed, total_src / speed)
         n_total = max(1, round(target / shot))
-        for aid in clip_ids:
-            d = float(assets[aid]["meta"]["duration"])
-            share = target * d / total_src           # this clip's share of the output
-            n = max(1, round(n_total * d / total_src))
-            seg_len = share / n
-            an = analyses.get(aid, {})
-            audio = an.get("audio", {})
-            energy = audio.get("energy_db", [])
-            win = audio.get("window_s", 0.5) or 0.5
-            cuts = [c["t"] for c in an.get("scenes", [])]
-            silent = audio.get("silent_ranges", [])
-            for st in _pick_windows(d, n, seg_len, energy, win, cuts, silent):
-                segments.append(PlanSegment(asset_id=aid, src_in=st, src_out=round(min(d, st + seg_len), 3),
-                                            reason="most active moment in this part"))
-        summary = (f"{len(segments)} cuts of about {target / max(1, len(segments)):.1f}s each, "
-                   f"picked from the liveliest moments, {target:.0f}s total.")
+        n_trans = len(range(1, n_total, trans_every)) if trans_type and n_total > 1 else 0
+        segments = []
+        if target >= total_src / speed - 0.05 and not trans_type:
+            for aid in clip_ids:
+                dur = float(assets[aid]["meta"]["duration"])
+                segments.append(PlanSegment(asset_id=aid, src_in=0.0, src_out=round(dur, 3), reason="full clip",
+                                            speed=speed))
+            summary_cuts = f"the full {total_src / speed:.0f}s of footage"
+        else:
+            out_total = target + n_trans * trans_d  # transitions overlap, so pick a little more
+            for aid in clip_ids:
+                dur = float(assets[aid]["meta"]["duration"])
+                share = out_total * dur / total_src
+                n = max(1, round(n_total * dur / total_src))
+                seg_out = share / n
+                src_len = min(seg_out * speed, dur / n)
+                an = analyses.get(aid, {})
+                audio = an.get("audio", {})
+                for st in _pick_windows(dur, n, src_len, audio.get("energy_db", []), audio.get("window_s", 0.5) or 0.5,
+                                        [c["t"] for c in an.get("scenes", [])], audio.get("silent_ranges", [])):
+                    segments.append(PlanSegment(asset_id=aid, src_in=st, src_out=round(min(dur, st + src_len), 3),
+                                                reason="most active moment in this part", speed=speed))
+            summary_cuts = f"{len(segments)} cuts of about {target / max(1, len(segments)):.1f}s"
 
-    return EditPlan(summary=summary, segments=segments, unsupported_requests=detect_unsupported(prompt),
-                    original_audio_volume=volume, notes=notes)
+    # ---- per-segment creative layer
+    for i, sg in enumerate(segments):
+        if trans_type and i > 0 and i % trans_every == 0:
+            limit = min(segments[i - 1].out_len, sg.out_len) / 2 - 0.05
+            if limit >= 0.15:
+                sg.transition_in, sg.transition_duration = trans_type, round(min(trans_d or 0.5, limit), 2)
+    zoom_kind, zoom_every = d.zoom, 1
+    if not zoom_kind and style.get("zoom_ratio", 0) >= 0.25:
+        zoom_kind, zoom_every = style.get("zoom_kind", "in"), max(1, round(1 / style["zoom_ratio"]))
+    if zoom_kind:
+        for i, sg in enumerate(segments):
+            if i % zoom_every:
+                continue
+            kind = ("in" if (i // zoom_every) % 2 == 0 else "out") if zoom_kind == "alternate" else zoom_kind
+            if kind == "pan_left" and i % 2:
+                kind = "pan_right"
+            sg.zoom, sg.zoom_amount = kind, 0.12 if d.pacing == "fast" else 0.15
+    if (d.ramps or d.slowmo) and speed == 1.0:
+        long_enough = [sg for sg in segments if sg.out_len >= 1.0]
+        if d.slowmo and not d.ramps:
+            chosen = long_enough[1::3][:3] or long_enough[:1]
+            patterns = ["slow_middle"] * len(chosen)
+        else:
+            chosen = long_enough[::3]
+            patterns = ["slow_middle" if j % 2 == 0 else "fast_middle" for j in range(len(chosen))]
+        for sg, pat in zip(chosen, patterns):
+            sg.speed_ramp = pat
+        if not chosen:
+            notes.append("The cuts are too short for speed ramps.")
+
+    plan = EditPlan(segments=segments, original_audio_volume=volume, unsupported_requests=unsupported, notes=notes)
+    total = plan.duration
+    plan.color_preset = d.color or (style.get("color_preset") if style.get("color_preset") not in (None, "none") else "none")
+    plan.effects = list(d.effects)
+    any_audio = any(assets[a]["meta"].get("has_audio") for a in clip_ids)
+    if d.captions or (style.get("captions") and any_audio and volume > 0):
+        plan.captions.mode = "speech"
+        plan.captions.style = d.caption_style if d.captions else ("bold" if style.get("caption_position") == "center"
+                                                                   else "subtitle")
+        plan.captions.position = d.caption_position if d.captions else (style.get("caption_position") or "bottom")
+    # titles: quoted text, one after another from the start; "... at the end" goes last
+    t_pos = "top" if plan.captions.mode == "speech" and plan.captions.position == "center" else "center"
+    span = min(2.5, max(1.0, total / (len(d.texts) + (1 if d.end_text else 0) + 1)))
+    for k, text in enumerate(d.texts):
+        start = k * span
+        if start < total - 0.3:
+            plan.texts.append(PlanText(text=text, start=round(start, 2), end=round(min(total, start + span), 2),
+                                       style="title", position=t_pos))
+    if d.end_text and total > 1.0:
+        plan.texts.append(PlanText(text=d.end_text, start=round(max(0.0, total - span), 2), end=round(total, 2),
+                                   style="title", position=t_pos))
+    if music:
+        plan.music = PlanMusic(use=True, beat_sync=beat_sync,
+                               volume=d.music_volume or (0.55 if any_audio and volume > 0 else 0.9),
+                               duck=bool(any_audio and volume > 0))
+    if d.sfx:
+        plan.sfx_on_transitions = any(sg.transition_in != "none" for sg in segments)
+        pos = 0.0
+        for i, sg in enumerate(segments):
+            if i > 0 and sg.transition_in == "none" and i % 4 == 0:
+                plan.sound_effects.append(PlanSfx(name="swoosh", at=round(max(0.0, pos - 0.15), 2)))
+            pos += sg.out_len - (sg.transition_duration if i > 0 and sg.transition_in != "none" else 0)
+        for t in plan.texts[:3]:
+            plan.sound_effects.append(PlanSfx(name="pop", at=t.start))
+        if not plan.sound_effects and not plan.sfx_on_transitions and len(segments) > 1:
+            pos = segments[0].out_len
+            plan.sound_effects.append(PlanSfx(name="whoosh", at=round(max(0.0, pos - 0.3), 2)))
+    plan.intro = d.intro or "none"
+    plan.outro = d.outro or "none"
+
+    parts = [summary_cuts]
+    if beat_sync:
+        parts.append("on the beat")
+    if any(sg.transition_in != "none" for sg in segments):
+        parts.append(f"{trans_type} transitions")
+    if any(sg.zoom != "none" for sg in segments):
+        parts.append("zooms")
+    if any(sg.speed_ramp != "none" for sg in segments):
+        parts.append("speed ramps")
+    if plan.color_preset != "none":
+        parts.append(f"{plan.color_preset} colour")
+    if plan.captions.mode == "speech":
+        parts.append("subtitles")
+    if plan.texts:
+        parts.append("titles")
+    if plan.music.use:
+        parts.append("music")
+    if plan.sound_effects or plan.sfx_on_transitions:
+        parts.append("sound effects")
+    if reference:
+        parts.append("paced like your reference")
+    plan.summary = (", ".join(parts) + f" — {total:.0f}s total.").capitalize()
+    return plan

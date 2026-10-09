@@ -46,3 +46,42 @@ class OpenAICompatProvider:
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
             raise LLMError("The AI planner returned malformed output.", retryable=True,
                            detail=r.text[:500]) from e
+
+    def chat(self, *, system: str, messages: list[dict], tools: list[dict]) -> dict:
+        """One turn of a tool-using conversation (same neutral format as the Anthropic adapter)."""
+        api_msgs: list[dict] = [{"role": "system", "content": system}]
+        for m in messages:
+            if m["role"] == "user":
+                api_msgs.append({"role": "user", "content": m["content"]})
+            elif m["role"] == "assistant":
+                api_msgs.append(m["raw"])
+            else:
+                for r in m["results"]:
+                    api_msgs.append({"role": "tool", "tool_call_id": r["id"], "content": r["content"]})
+        body = {"model": self.model, "messages": api_msgs,
+                "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                                             "parameters": t["input_schema"]}} for t in tools]}
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        try:
+            r = httpx.post(f"{self.base_url}/chat/completions", json=body, headers=headers, timeout=self.timeout_s)
+        except httpx.HTTPError as e:
+            raise LLMError("Could not reach the AI agent.", retryable=True, detail=str(e)) from e
+        if r.status_code in (401, 403):
+            raise LLMError("The AI agent is not configured correctly (API key rejected).", retryable=False)
+        if r.status_code == 429 or r.status_code >= 500:
+            raise LLMError("The AI agent is busy or failed.", retryable=True, detail=r.text[:500])
+        if r.status_code >= 400:
+            raise LLMError("The AI agent rejected the request.", retryable=False, detail=r.text[:500])
+        try:
+            msg = r.json()["choices"][0]["message"]
+            calls = []
+            for tc in msg.get("tool_calls") or []:
+                args = tc["function"].get("arguments") or "{}"
+                calls.append({"id": tc["id"], "name": tc["function"]["name"],
+                              "input": json.loads(args) if isinstance(args, str) else args})
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
+            raise LLMError("The AI agent returned malformed output.", retryable=True, detail=r.text[:500]) from e
+        raw = {"role": "assistant", "content": msg.get("content") or "", **({"tool_calls": msg["tool_calls"]}
+                                                                          if msg.get("tool_calls") else {})}
+        return {"text": msg.get("content") or "", "tool_calls": calls, "raw": raw,
+                "stop": "tool_use" if calls else "end_turn"}

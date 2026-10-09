@@ -1,37 +1,34 @@
 # AI Video Editor Agent
 
-A mobile-first AI agent that really edits video. Upload a clip from your phone,
-describe the edit, and the server plans it, builds a real timeline, renders it
-with FFmpeg, verifies the output file, and gives you an MP4 to download.
+A mobile-first AI agent that really edits video. From your phone you upload clips (plus optional music
+and a style-reference video), describe the edit, and the server plans it, builds a real timeline,
+renders it with FFmpeg, verifies and quality-checks the file, and gives you an MP4 to download.
 
 Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## Status: Phase 1 complete
+## Status: Phases 1–6 implemented
 
-| Works now | Coming |
+| Phase | What works |
 |---|---|
-| Upload MP4 / MOV / WEBM from your phone (with progress, size + format checks) | Multiple clips, captions/subtitles, music (Phase 2) |
-| Prompt → edit plan (Claude, any OpenAI-compatible model, or the built-in no-API-key planner) | Reference-video style matching (Phase 3) |
-| **Two ways to ask:** *Quick setup* (pick format/length/framing, describe the edit) or *Full prompt* (one prompt, the agent works out everything) | |
-| Prompt instructions it follows exactly: time ranges (“0:05–0:12”), first/last N seconds, remove silent parts, mute / louder / quieter | |
-| Cuts chosen from scene changes and audio activity, avoiding silence | Zooms, speed ramps, transitions, beat sync, colour, SFX (Phase 4) |
-| Presets: Instagram Reels, YouTube Shorts, TikTok, YouTube landscape, Square; 720p / 1080p | MCP server for external agents (Phase 5) |
-| Framing: fill (crop), fit with blurred background, fit with bars | |
-| iPhone HDR (HLG/PQ) footage tone-mapped to SDR; rotated phone video handled | |
-| Render → independent verification (codec, size, duration, full decode) → preview + Download MP4 | |
-| Edit again (revises the previous plan; unchanged segments are reused from cache) | |
+| 1 | Upload → prompt → planned cuts → verified H.264/AAC MP4 · presets (Reels, Shorts, TikTok, YouTube, Square) · 720p/1080p · crop / blurred-background / black-bar framing · iPhone HDR and rotated video handled |
+| 2 | Up to 10 clips in order · subtitles from speech (faster-whisper) in 3 styles · text titles · music with loop, fades and automatic ducking under speech · overlay (picture-in-picture) and audio tracks |
+| 3 | Reference video → style profile (shot length and pacing curve, cut rate, dissolves/fades, zoom frequency, motion, caption placement, beat alignment, colour) → applied to *your* footage. The reference footage is never used. |
+| 4 | Zooms / pans / Ken Burns / punch-ins and keyframes · speed changes and speed ramps · 21 transitions · colour looks (warm, cool, cinematic, B&W, vintage, vibrant, moody) and manual adjustments · vignette / grain / blur / sharpen / sepia · crop, rotate · beat detection with cuts snapped to the beat · 7 built-in sound effects · fade in/out · loudness normalisation (−14 LUFS) |
+| 5 | 40 validated tools · MCP server at `/mcp/` for external agents (Claude Code etc.) · AI agent revises the previous edit with tools on "Edit again" · automatic quality check (black frames, frozen picture, loudness, clipping) with one repair round |
+| 6 | Resumable chunked uploads (survive network drops) · thumbnails · reorderable clip list · edit details (cut list, quality numbers) · share sheet · offline app shell (PWA) · parallel, cached rendering (only changed pieces re-render) |
 
-Full prompt example: *"Make a 20-second vertical TikTok in 720p with a blurred background. Use 0:03–0:10,
-then the last 8 seconds. Remove the silent parts and mute the sound."* The result screen shows how the
-agent understood it (e.g. "TikTok · 9:16 · 720p · length from your cuts · blurred background; exact time
-ranges …; original sound muted").
+Two ways to ask:
+- **Quick setup**: pick the format, length and framing, and describe the edit.
+- **Full prompt**: one prompt and the agent decides everything. Example: *"Make a 30-second vertical
+  Reel like my reference: fast cuts on the beat, punch-in zooms, warm cinematic colour, bold subtitles,
+  the title "Summer 2026" and "Follow for more" at the end, whooshes on transitions, fade out."*
 
-Anything in your prompt that isn't available yet is listed under **"Not applied yet"**
-on the result screen. It is never faked.
+Anything that can't be done (e.g. stabilisation, green screen, voice-over) is listed under **"Not
+applied"**, never faked. The result summary lists only what is actually in the final video.
 
 ## Run it
 
-Requirements: Python 3.11+ and FFmpeg (with libx264, libzimg).
+Requirements: Python 3.11+ and FFmpeg (with libx264, libass, libzimg).
 
 ```bash
 cd server
@@ -39,29 +36,35 @@ pip install -r requirements-dev.txt
 ACCESS_TOKEN=pick-a-code uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Open `http://<server>:8000` on your phone, enter the access code, upload, prompt, **CREATE EDIT**.
-On the phone you can "Add to Home Screen" to use it like an app.
+Open `http://<server>:8000` on your phone, enter the access code, add clips, write a prompt, **CREATE EDIT**.
+"Add to Home Screen" installs it like an app.
 
 ### Deploy (so you only need your phone)
 
-Any small Linux VPS or container host (Railway, Render, Fly.io, a $5–10 VPS) works:
+Any small Linux VPS or container host works:
 `docker build -t ai-video-editor . && docker run -p 8000:8000 -v editor-data:/data --env-file .env ai-video-editor`.
-Put it behind HTTPS (the host's TLS, or Caddy/nginx). See `.env.example` for settings.
-2 vCPU / 2 GB RAM is enough: rendering is done one segment at a time
-(≈0.4 GB peak for a 90 s, 70-cut 1080p reel).
+Put it behind HTTPS. Settings are in `.env.example`. 2 vCPU / 2 GB RAM is enough, because each render
+piece uses about 0.4 GB at 1080p. Raise `RENDER_PARALLEL` on bigger machines.
 
-### AI planner
+### AI planner / agent
 
 | `LLM_PROVIDER` | Needs | Notes |
 |---|---|---|
-| `auto` (default) | — | Uses Anthropic if `ANTHROPIC_API_KEY` is set, else OpenAI-compatible if `OPENAI_API_KEY` + `LLM_MODEL` are set, else the built-in planner |
+| `auto` (default) | — | Anthropic if `ANTHROPIC_API_KEY` is set, else OpenAI-compatible if `OPENAI_API_KEY` + `LLM_MODEL`, else built-in |
 | `anthropic` | `ANTHROPIC_API_KEY` | Default model `claude-opus-5-5` (override with `LLM_MODEL`) |
-| `openai` | `OPENAI_BASE_URL`, `LLM_MODEL`, (`OPENAI_API_KEY`) | OpenAI, OpenRouter, Groq, local Ollama/vLLM … |
-| `rules` | — | Free, offline, deterministic |
+| `openai` | `OPENAI_BASE_URL`, `LLM_MODEL` (`OPENAI_API_KEY`) | OpenAI, OpenRouter, Groq, local Ollama/vLLM… |
+| `rules` | — | Free, offline, deterministic; understands all features listed above from plain English |
 
-One edit costs one planner call (two if the first plan fails validation). The model
-gets a compact JSON summary of your footage, never the video. If the AI planner
-fails, the built-in planner is used and the result says so.
+A new edit costs one planner call (two if the first plan fails validation). "Edit again" with an AI
+model runs a short tool-using agent loop. Models receive compact JSON summaries (scenes, loudness,
+beats, transcript, reference profile), never the video. If the AI fails, the built-in planner takes
+over and the result says so.
+
+### MCP (external agents)
+
+Endpoint `https://<server>/mcp/`, with header `Authorization: Bearer <ACCESS_TOKEN>`. Workflow:
+`list_assets` → `create_project` → editing tools (each takes `project_id`) → `render_project` →
+`get_job` → download `video_url`. Every call is validated and errors are returned, never faked.
 
 ## Tests
 
@@ -69,6 +72,18 @@ fails, the built-in planner is used and the result says so.
 cd server && python -m pytest -q
 ```
 
-The 61 tests generate their own media. They cover validation rules, transactions,
-rendering in every framing mode, rotation, files without audio, WEBM, A/V sync over many cuts,
-the segment cache, provider adapters (mocked), and the full HTTP workflow including failures and retries.
+92 tests generate their own media. They cover:
+- every engine operation and its validation, transactions, and every framing/effect/transition path
+- A/V sync, segment caching, HDR, rotation, WEBM
+- beat tracking accuracy and reference-style measurements
+- subtitle mapping (with a stand-in speech model)
+- the quality check and the full orchestrator job
+- the agent tool loop, the provider adapters (mocked), and the HTTP and MCP APIs, including auth, chunked
+  uploads and failure/retry paths
+
+Not verified in the development sandbox (network-blocked):
+- downloading the Whisper model
+- live calls to Claude or OpenAI
+- the Docker image build
+
+They are covered by mocked tests and run on a normal server.

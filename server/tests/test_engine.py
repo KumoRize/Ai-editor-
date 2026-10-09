@@ -107,10 +107,16 @@ def test_empty_timeline_invalid():
 def test_tool_layer_errors_and_unavailable_tools():
     ctx = ToolContext(editor=editor(), assets=ASSETS)
     assert call_tool(ctx, "nope")["error"]["code"] == "UNKNOWN_TOOL"
-    assert call_tool(ctx, "add_zoom")["error"]["code"] == "NOT_AVAILABLE"
+    assert call_tool(ctx, "add_zoom", {"clip_id": "nope"})["error"]["code"] == "CLIP_NOT_FOUND"
     assert call_tool(ctx, "select_clip", {"asset_id": "a_1"})["error"]["code"] == "BAD_ARGUMENTS"
     names = {t["name"] for t in tool_specs()}
-    assert "select_clip" in names and "add_zoom" not in names
+    required = {"analyze_video", "get_video_metadata", "extract_frames", "detect_scenes", "analyze_audio", "detect_beats",
+                "select_clip", "trim_clip", "split_clip", "move_clip", "delete_clip", "add_video_track",
+                "add_audio_track", "add_music", "set_volume", "add_caption", "add_subtitles", "add_text",
+                "add_transition", "add_zoom", "add_keyframe", "change_speed", "crop_video", "resize_video",
+                "rotate_video", "apply_effect", "apply_color_adjustment", "add_sound_effect", "render_preview",
+                "validate_timeline", "export_video"}
+    assert required <= names  # every tool from the original specification is implemented
     assert all(t["input_schema"]["type"] == "object" for t in tool_specs())
 
 

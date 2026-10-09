@@ -1,6 +1,6 @@
 # AI Video Editor Agent — Architecture
 
-Status: **design approved for Phase 1** · No application code yet.
+Status: **Phase 1 implemented** (see §15 for what changed during implementation).
 
 This document fixes the architecture, the editing-engine choice, the data
 contracts (timeline / edit plan), the tool surface the AI model uses, and the
@@ -399,3 +399,39 @@ the main workflow on generated test media.
 * Whisper transcription on CPU is the slowest analysis step; it is optional
   and cached.
 * Single-user MVP auth; multi-user accounts are out of scope until after Phase 6.
+
+---
+
+## 15. Phase 1 implementation notes
+
+What was built, and the decisions that changed while testing it:
+
+* **Segment-based rendering (changed from one big filter graph).** The first
+  implementation rendered the whole timeline in one FFmpeg graph with one input
+  per clip. Measured on a 90 s, 70-cut 1080p reel it peaked at **4.8 GB RAM**,
+  which would crash a small server. Now each clip is rendered on its own to a
+  normalised intermediate (H.264 + PCM, exact frame count) and the parts are joined
+  with the concat demuxer (video copied, audio encoded to AAC once). The same reel
+  now peaks at **≈0.4 GB** at the same speed. Intermediates are cached by a hash of
+  everything that affects them, so "Edit again" only re-renders changed segments.
+* **Frame-exact timing.** Clip lengths are assigned in whole frames from cumulative
+  timeline positions (no rounding drift), and audio is trimmed to the matching sample
+  count. Allowed output fps are 24/25/30/50/60, so 48 kHz audio lines up exactly.
+* **HDR phone footage.** iPhone HLG/PQ video is tone-mapped to SDR BT.709
+  (zscale + tonemap), and outputs are explicitly tagged BT.709. Without this the
+  output was 8-bit but still labelled HDR.
+* **Verification** decodes the entire output (not only a few frames), so corruption
+  at a segment join can't slip through.
+* **Planner.** One structured-output LLM call returns an `EditPlan`, which is
+  validated against real metadata. One repair round is allowed, then there is an
+  honest fallback to the built-in planner. The built-in planner skips zones that
+  are mostly silent and redistributes those cuts. Parts of a request that need
+  later phases are reported as "Not applied yet".
+* **Tool layer** (`server/app/tools/registry.py`): 15 Phase 1 tools available. The
+  other tools in §6 are registered with their phase and refuse to run, so neither
+  the model nor the UI can trigger them.
+* **Limits:** 1 clip per edit (Phase 2 lifts this), 5 active jobs, 500 MB uploads,
+  20-minute sources, and preset max durations.
+* **Not yet verified:** the Docker image build. The test sandbox blocks the Debian
+  package mirror. Live calls to Claude or OpenAI-compatible APIs are covered by
+  mocked tests only.

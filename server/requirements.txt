@@ -1,0 +1,7 @@
+fastapi==0.143.0
+uvicorn==0.53.0
+pydantic==2.13.5
+httpx==0.28.1
+numpy==2.5.3
+# Optional: only needed when LLM_PROVIDER=anthropic (or auto with ANTHROPIC_API_KEY set)
+anthropic==1.12.1

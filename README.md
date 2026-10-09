@@ -12,12 +12,19 @@ Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 |---|---|
 | Upload MP4 / MOV / WEBM from your phone (with progress, size + format checks) | Multiple clips, captions/subtitles, music (Phase 2) |
 | Prompt → edit plan (Claude, any OpenAI-compatible model, or the built-in no-API-key planner) | Reference-video style matching (Phase 3) |
+| **Two ways to ask:** *Quick setup* (pick format/length/framing, describe the edit) or *Full prompt* (one prompt, the agent works out everything) | |
+| Prompt instructions it follows exactly: time ranges (“0:05–0:12”), first/last N seconds, remove silent parts, mute / louder / quieter | |
 | Cuts chosen from scene changes and audio activity, avoiding silence | Zooms, speed ramps, transitions, beat sync, colour, SFX (Phase 4) |
 | Presets: Instagram Reels, YouTube Shorts, TikTok, YouTube landscape, Square; 720p / 1080p | MCP server for external agents (Phase 5) |
 | Framing: fill (crop), fit with blurred background, fit with bars | |
 | iPhone HDR (HLG/PQ) footage tone-mapped to SDR; rotated phone video handled | |
 | Render → independent verification (codec, size, duration, full decode) → preview + Download MP4 | |
 | Edit again (revises the previous plan; unchanged segments are reused from cache) | |
+
+Full prompt example: *"Make a 20-second vertical TikTok in 720p with a blurred background. Use 0:03–0:10,
+then the last 8 seconds. Remove the silent parts and mute the sound."* The result screen shows how the
+agent understood it (e.g. "TikTok · 9:16 · 720p · length from your cuts · blurred background; exact time
+ranges …; original sound muted").
 
 Anything in your prompt that isn't available yet is listed under **"Not applied yet"**
 on the result screen. It is never faked.
@@ -62,6 +69,6 @@ fails, the built-in planner is used and the result says so.
 cd server && python -m pytest -q
 ```
 
-The 48 tests generate their own media. They cover validation rules, transactions,
+The 61 tests generate their own media. They cover validation rules, transactions,
 rendering in every framing mode, rotation, files without audio, WEBM, A/V sync over many cuts,
 the segment cache, provider adapters (mocked), and the full HTTP workflow including failures and retries.

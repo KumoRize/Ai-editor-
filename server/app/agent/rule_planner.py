@@ -11,7 +11,12 @@ from __future__ import annotations
 import math
 import re
 
+from ..errors import EditorError
 from .plan import EditPlan, PlanSegment
+from .prompt_parser import Directives, fmt_t, parse_prompt
+
+MIN_PIECE = 0.3   # shortest piece kept when following explicit instructions (s)
+PAD = 0.15        # silence kept around speech when removing silent parts (s)
 
 # Requested features that are not implemented yet, mapped to the phase that adds them.
 UNSUPPORTED_KEYWORDS: list[tuple[str, str]] = [
@@ -120,14 +125,92 @@ def _pick_windows(d: float, n: int, seg_len: float, energy: list[float], win: fl
     return sorted(picks)
 
 
+def _explicit_segments(d: Directives, assets: dict[str, dict], analyses: dict[str, dict],
+                       clip_ids: list[str], notes: list[str]) -> list[PlanSegment] | None:
+    """Segments the prompt asked for literally (time ranges, first/last N s, remove silence)."""
+    if not (d.ranges or d.first_s or d.last_s or d.remove_silence):
+        return None
+    aid = clip_ids[0]  # Phase 1: one clip per edit
+    dur = float(assets[aid]["meta"]["duration"])
+    pieces: list[tuple[float, float, str]] = []
+    for a, b in d.ranges:
+        if a >= dur - MIN_PIECE:
+            notes.append(f"Skipped {fmt_t(a)}–{fmt_t(b)}: your video is only {dur:.1f}s long.")
+            continue
+        if b > dur:
+            notes.append(f"{fmt_t(a)}–{fmt_t(b)} goes past the end of the video, so it stops at {fmt_t(dur)}.")
+        pieces.append((a, min(b, dur), "time range from your prompt"))
+    if d.first_s:
+        pieces.append((0.0, min(d.first_s, dur), f"first {d.first_s:g}s"))
+    if d.last_s:
+        pieces.append((max(0.0, dur - d.last_s), dur, f"last {d.last_s:g}s"))
+    if (d.ranges or d.first_s or d.last_s) and not pieces:
+        raise EditorError("PROMPT_TIMES_INVALID",
+                          f"The times in your prompt are outside the video (it is {dur:.1f}s long).")
+    if not pieces:
+        pieces = [(0.0, dur, "")]
+
+    if d.remove_silence:
+        audio = analyses.get(aid, {}).get("audio", {})
+        if not audio.get("has_audio"):
+            notes.append("Your video has no sound, so there were no silent parts to remove.")
+        else:
+            silent = audio.get("silent_ranges", [])
+            kept: list[tuple[float, float, str]] = []
+            for a, b, why in pieces:
+                cur = a
+                for s0, s1 in silent:
+                    s0, s1 = s0 + PAD, s1 - PAD  # keep a little air around speech
+                    if s1 <= cur or s0 >= b or s1 - s0 <= 0:
+                        continue
+                    if s0 > cur:
+                        kept.append((cur, s0, why or "non-silent part"))
+                    cur = max(cur, s1)
+                if b > cur:
+                    kept.append((cur, b, why or "non-silent part"))
+            removed = sum(b - a for a, b, _ in pieces) - sum(b - a for a, b, _ in kept)
+            notes.append(f"Removed {removed:.1f}s of silence." if removed > 0.05 else "No silent parts were found.")
+            pieces = kept
+    return [PlanSegment(asset_id=aid, src_in=round(a, 3), src_out=round(b, 3), reason=why)
+            for a, b, why in pieces if b - a >= MIN_PIECE]
+
+
 def plan_rules(prompt: str, assets: dict[str, dict], analyses: dict[str, dict],
-               target_duration: float) -> EditPlan:
+               target_duration: float | None, directives: Directives | None = None,
+               max_duration: float | None = None) -> EditPlan:
+    """target_duration None = keep everything the prompt selected (no length target)."""
+    d = directives or parse_prompt(prompt)
+    notes: list[str] = list(d.notes)
     clip_ids = [aid for aid, a in assets.items() if a.get("role") == "clip"]
     total_src = sum(float(assets[a]["meta"]["duration"]) for a in clip_ids)
-    target = min(target_duration, total_src)
+    volume = 1.0 if d.volume is None else d.volume
+
+    explicit = _explicit_segments(d, assets, analyses, clip_ids, notes)
+    if explicit is not None:
+        if not explicit:
+            raise EditorError("PROMPT_TIMES_INVALID", "Nothing was left to use after following your prompt.")
+        limit = min(x for x in (target_duration, max_duration) if x) if (target_duration or max_duration) else None
+        total = sum(sg.src_out - sg.src_in for sg in explicit)
+        if limit and total > limit + 0.05:  # shorten from the end to fit the requested/allowed length
+            kept, acc = [], 0.0
+            for sg in explicit:
+                room = limit - acc
+                if room < MIN_PIECE:
+                    break
+                if sg.src_out - sg.src_in > room:
+                    sg = sg.model_copy(update={"src_out": round(sg.src_in + room, 3)})
+                kept.append(sg)
+                acc += sg.src_out - sg.src_in
+            notes.append(f"Your selection was {total:.1f}s, so it was shortened to {limit:g}s.")
+            explicit = kept
+        total = sum(sg.src_out - sg.src_in for sg in explicit)
+        summary = f"Followed your prompt: {len(explicit)} part(s), {total:.1f}s total."
+        return EditPlan(summary=summary, segments=explicit, unsupported_requests=detect_unsupported(prompt),
+                        original_audio_volume=volume, notes=notes)
+
+    target = min(target_duration or total_src, total_src)
     shot = shot_length_for(prompt)
     segments: list[PlanSegment] = []
-
     if target >= total_src - 0.05:
         for aid in clip_ids:
             d = float(assets[aid]["meta"]["duration"])
@@ -152,4 +235,5 @@ def plan_rules(prompt: str, assets: dict[str, dict], analyses: dict[str, dict],
         summary = (f"{len(segments)} cuts of about {target / max(1, len(segments)):.1f}s each, "
                    f"picked from the liveliest moments, {target:.0f}s total.")
 
-    return EditPlan(summary=summary, segments=segments, unsupported_requests=detect_unsupported(prompt))
+    return EditPlan(summary=summary, segments=segments, unsupported_requests=detect_unsupported(prompt),
+                    original_audio_volume=volume, notes=notes)

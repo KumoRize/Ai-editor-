@@ -1,6 +1,24 @@
 // Mobile web UI. Every action calls a real backend endpoint; nothing is simulated.
 const $ = (id) => document.getElementById(id);
-const state = { config: null, asset: null, uploading: false, jobId: null, lastJob: null, pollTimer: null, parentJobId: null };
+const state = { config: null, asset: null, uploading: false, jobId: null, lastJob: null, pollTimer: null, parentJobId: null,
+  mode: "settings" };
+const MODES = {
+  settings: {
+    hint: "Choose the format, length and framing below, and describe the edit in the prompt.",
+    label: "Prompt",
+    placeholder: "e.g. Make a fast-paced reel with the most exciting moments",
+    rows: 4,
+  },
+  prompt: {
+    hint: "Write everything in one prompt. The agent works out the platform, format, length, framing and cuts from it.",
+    label: "Full prompt — describe the whole edit",
+    placeholder: "e.g. Make a 20-second vertical TikTok in 1080p with a blurred background. " +
+      "Use 0:03–0:10, then the last 8 seconds. Remove the silent parts and keep the original sound.",
+    rows: 7,
+  },
+};
+const EXAMPLE_PROMPT = "Make a 20-second vertical Instagram Reel in 1080p with a blurred background. " +
+  "Fast cuts from the most exciting moments, remove the silent parts, keep the original sound.";
 const STEP_ICONS = { pending: "○", running: '<span class="spin"></span>', done: "✓", failed: "✕", skipped: "–" };
 
 function show(view) {
@@ -48,10 +66,34 @@ async function init() {
   $("fit").innerHTML = Object.entries(c.fits).map(([k, l]) => `<option value="${k}">${l}</option>`).join("");
   applyPreset();
   $("preset").addEventListener("change", applyPreset);
+  let saved_mode = "settings";
+  try { saved_mode = localStorage.getItem("ve_mode") || "settings"; } catch { /* storage unavailable */ }
+  setMode(saved_mode);
 
   const saved = localStorage.getItem("ve_job");
   if (saved) { resumeJob(saved); } else { show("form"); }
 }
+
+function setMode(mode) {
+  if (!MODES[mode]) mode = "settings";
+  state.mode = mode;
+  try { localStorage.setItem("ve_mode", mode); } catch { /* storage unavailable */ }
+  const m = MODES[mode];
+  document.querySelectorAll(".seg-btn").forEach((b) => {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-checked", String(on));
+  });
+  $("mode-hint").textContent = m.hint;
+  $("prompt-label").textContent = m.label;
+  $("prompt").placeholder = state.parentJobId ? $("prompt").placeholder : m.placeholder;
+  $("prompt").rows = m.rows;
+  $("settings-card").hidden = mode === "prompt";
+  $("prompt-help").hidden = mode !== "prompt";
+  $("example-btn").hidden = mode !== "prompt";
+}
+document.querySelectorAll(".seg-btn").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+$("example-btn").addEventListener("click", () => { $("prompt").value = EXAMPLE_PROMPT; $("prompt").focus(); });
 
 function applyPreset() {
   const p = state.config.presets[$("preset").value];
@@ -152,7 +194,14 @@ async function createJob(parentJobId) {
   $("form-error").hidden = true;
   if (!state.asset) return;
   const dur = parseFloat($("duration").value);
+  if (state.mode === "prompt" && $("prompt").value.trim().length < 3) {
+    $("form-error").textContent = "Write your prompt first — in Full prompt mode the agent takes everything from it.";
+    $("form-error").hidden = false;
+    $("prompt").focus();
+    return;
+  }
   const payload = {
+    mode: state.mode,
     asset_ids: [state.asset.asset_id],
     prompt: $("prompt").value.trim(),
     preset: $("preset").value,
@@ -267,8 +316,9 @@ $("again-btn").addEventListener("click", () => {
   if (req.duration) $("duration").value = req.duration;
   if (req.fit) $("fit").value = req.fit;
   $("prompt").value = req.prompt || "";
-  $("prompt").placeholder = "Describe what to change, e.g. make it shorter and start with the action";
   state.parentJobId = state.lastJob?.job_id || null;
+  setMode(req.mode || state.mode);
+  $("prompt").placeholder = "Describe what to change, e.g. make it shorter and start with the action";
   $("upload-status").hidden = false;
   $("upload-name").textContent = "Same clip as the previous edit";
   $("upload-pct").textContent = "Ready ✓";
@@ -284,7 +334,7 @@ $("new-btn").addEventListener("click", () => {
   $("edit-form").reset(); applyPreset();
   $("upload-status").hidden = true;
   $("drop-text").textContent = "Tap to choose a video (MP4, MOV, WEBM)";
-  $("prompt").placeholder = "e.g. Make a fast-paced 30 second reel with the most exciting moments";
+  setMode(state.mode);
   updateCreateButton();
   show("form");
 });

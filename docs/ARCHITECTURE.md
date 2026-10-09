@@ -435,3 +435,10 @@ What was built, and the decisions that changed while testing it:
 * **Not yet verified:** the Docker image build. The test sandbox blocks the Debian
   package mirror. Live calls to Claude or OpenAI-compatible APIs are covered by
   mocked tests only.
+* **Full prompt mode** (`mode: "prompt"` on `POST /api/jobs`). The form settings are ignored. The
+  output settings (preset, aspect, resolution, length, framing) come from the prompt: the LLM
+  returns them in a `settings` object (`PROMPT_MODE_SCHEMA`), or the built-in planner extracts them
+  with `prompt_parser.py`. Missing values get preset defaults, and preset limits are enforced with a
+  note. In both modes, explicit instructions are followed literally:
+  time ranges, first/last N seconds, remove silence, and original-audio volume (via `set_volume`).
+  The result says how the prompt was understood.

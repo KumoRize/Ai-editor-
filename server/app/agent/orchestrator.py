@@ -18,7 +18,8 @@ from ..errors import EditorError
 from ..presets import PRESETS, output_size
 from ..tools.registry import ToolContext, call_tool
 from .llm_planner import plan_with_llm
-from .plan import EditPlan, validate_plan
+from .plan import EditPlan, ProjectSettings, resolve_settings, validate_plan
+from .prompt_parser import parse_prompt
 from .providers import LLMError, make_provider
 from .rule_planner import detect_unsupported, plan_rules
 
@@ -78,13 +79,18 @@ def _must(res: dict) -> dict:
 def run_edit_job(job_id: str, request: dict, assets: dict[str, dict], work_dir: Path,
                  reporter: Reporter, previous_plan: dict | None = None) -> dict:
     s = get_settings()
-    preset = PRESETS[request["preset"]]
-    aspect = request.get("aspect_ratio") or preset["aspect_ratio"]
-    width, height = output_size(aspect, request["resolution"])
-    target = float(request.get("duration") or preset["default_duration"])
-    max_dur = float(preset["max_duration"])
     prompt = request.get("prompt", "")
+    prompt_mode = request.get("mode") == "prompt"
     notes: list[str] = []
+    directives = parse_prompt(prompt)
+    explicit_cuts = bool(directives.ranges or directives.first_s or directives.last_s or directives.remove_silence)
+    if prompt_mode:  # "Full prompt": every setting comes from the user's text
+        settings, snotes = resolve_settings(directives.preset, directives.aspect_ratio, directives.resolution,
+                                            directives.duration, directives.fit, auto_length=explicit_cuts)
+    else:
+        settings, snotes = resolve_settings(request.get("preset"), request.get("aspect_ratio"),
+                                            request.get("resolution"), request.get("duration"), request.get("fit"))
+    notes += snotes
 
     editor = TimelineEditor(None, assets)
     ctx = ToolContext(editor=editor, assets=assets, work_dir=work_dir)
@@ -118,19 +124,31 @@ def run_edit_job(job_id: str, request: dict, assets: dict[str, dict], work_dir: 
         notes.append(f"AI planner unavailable ({e.message}); used the built-in planner.")
     if provider is not None:
         try:
-            plan, warnings, calls = plan_with_llm(provider, prompt, assets, ctx.analyses, target, max_dur,
-                                                  previous_plan, s.llm_max_calls_per_job)
+            plan, warnings, calls = plan_with_llm(
+                provider, prompt, assets, ctx.analyses, settings.duration,
+                float(PRESETS[settings.preset]["max_duration"]), previous_plan, s.llm_max_calls_per_job,
+                prompt_mode=prompt_mode)
             plan.planner = provider.name
+            if prompt_mode and plan.settings:
+                settings = ProjectSettings(**plan.settings)
             log.info("job %s: LLM plan in %d call(s)", job_id, calls)
         except LLMError as e:
             log.warning("job %s: LLM planner failed: %s %s", job_id, e.message, e.detail)
             notes.append(f"{e.message} The built-in planner was used instead.")
+    max_dur = float(PRESETS[settings.preset]["max_duration"])
     if plan is None:
-        plan = plan_rules(prompt, assets, ctx.analyses, target)
+        plan = plan_rules(prompt, assets, ctx.analyses, settings.duration, directives, max_dur)
         plan.planner = "built-in rules"
-        errors, warnings = validate_plan(plan, assets, target, max_dur)
+        errors, warnings = validate_plan(plan, assets, None if explicit_cuts else settings.duration, max_dur)
         if errors:
             raise EditorError("PLAN_INVALID", "Could not create a valid edit plan: " + errors[0])
+        if prompt_mode:
+            plan.settings = settings.model_dump()
+    notes += plan.notes
+    if prompt_mode:
+        understood = [settings.describe()] + (directives.describe() if plan.planner == "built-in rules" else [])
+        notes.insert(0, "Understood your prompt as: " + "; ".join(understood) + ".")
+    width, height = output_size(settings.aspect_ratio, settings.resolution)
     # Make sure unsupported asks are reported even if the planner missed them.
     generic = {"video", "cuts", "changes", "matching", "a", "the", "background", "text"}
     for item in detect_unsupported(prompt):
@@ -146,18 +164,23 @@ def run_edit_job(job_id: str, request: dict, assets: dict[str, dict], work_dir: 
                                              "fit": "cover", "max_duration": max_dur}))
     with editor.transaction():
         for seg in plan.segments:
-            _must(call_tool(ctx, "select_clip", {"asset_id": seg.asset_id, "src_in": seg.src_in,
-                                                 "src_out": seg.src_out, "note": seg.reason}))
+            clip = _must(call_tool(ctx, "select_clip", {"asset_id": seg.asset_id, "src_in": seg.src_in,
+                                                        "src_out": seg.src_out, "note": seg.reason}))
+            if plan.original_audio_volume != 1.0:
+                _must(call_tool(ctx, "set_volume", {"clip_id": clip["clip_id"],
+                                                    "volume": plan.original_audio_volume}))
     summary = _must(call_tool(ctx, "validate_timeline"))
     reporter.set("build_timeline", "done", f"{summary['clips']} clip(s) on the timeline, {summary['duration']:.1f}s")
 
     # 5. Effects (Phase 1: output framing only).
     reporter.set("apply_effects", "running")
-    fit = request.get("fit", "cover")
+    fit = settings.fit
     _must(call_tool(ctx, "resize_video", {"width": width, "height": height, "fit": fit}))
     _must(call_tool(ctx, "validate_timeline"))
     (work_dir / "timeline.json").write_text(editor.timeline.model_dump_json(indent=2))
-    reporter.set("apply_effects", "done", f"{aspect} {width}x{height}, framing: {fit}")
+    vol = plan.original_audio_volume
+    sound = "" if vol == 1.0 else ", sound muted" if vol == 0 else f", sound {int(vol * 100)}%"
+    reporter.set("apply_effects", "done", f"{settings.aspect_ratio} {width}x{height}, framing: {fit}{sound}")
 
     # 6. Render, 7. verify (export_video renders then independently verifies).
     reporter.set("render", "running", frac=0.0)
@@ -184,6 +207,8 @@ def run_edit_job(job_id: str, request: dict, assets: dict[str, dict], work_dir: 
         "segments": [sg.model_dump() for sg in plan.segments],
         "unsupported_requests": plan.unsupported_requests,
         "notes": notes + warnings,
+        "mode": "prompt" if prompt_mode else "settings",
+        "settings": settings.model_dump(),
     }
 
 

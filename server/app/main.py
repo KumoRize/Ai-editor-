@@ -10,6 +10,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from . import jobs
@@ -162,6 +164,8 @@ async def upload(request: Request, filename: str, role: str = "clip"):
 
 # ------------------------------------------------------------------ jobs
 class JobIn(BaseModel):
+    # "settings": format/length/framing come from the form. "prompt": the agent reads them from the prompt.
+    mode: Literal["settings", "prompt"] = "settings"
     asset_ids: list[str] = Field(min_length=1, max_length=10)
     prompt: str = Field(default="", max_length=2000)
     preset: str = "instagram_reels"
@@ -175,8 +179,8 @@ class JobIn(BaseModel):
 def _public_job(j: dict) -> dict:
     out = {"job_id": j["job_id"], "status": j["status"], "progress": j["progress"], "steps": j["steps"],
            "error": j["error"], "request": {k: j["request"].get(k) for k in
-                                            ("asset_ids", "prompt", "preset", "aspect_ratio", "resolution",
-                                             "duration", "fit")}}
+                                            ("mode", "asset_ids", "prompt", "preset", "aspect_ratio",
+                                             "resolution", "duration", "fit")}}
     if j["status"] == "complete" and j["result"]:
         r = dict(j["result"])
         r.pop("output_file", None)
@@ -188,6 +192,8 @@ def _public_job(j: dict) -> dict:
 
 @app.post("/api/jobs")
 async def create_job(body: JobIn):
+    if body.mode == "prompt" and len(body.prompt.strip()) < 3:
+        raise EditorError("BAD_REQUEST", "Describe the edit you want in the prompt.")
     if body.preset not in PRESETS:
         raise EditorError("BAD_REQUEST", "Unknown preset.")
     aspect = body.aspect_ratio or PRESETS[body.preset]["aspect_ratio"]

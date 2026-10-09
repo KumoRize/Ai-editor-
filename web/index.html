@@ -31,6 +31,14 @@
   <section id="view-form" hidden>
     <form id="edit-form" novalidate>
       <div class="card">
+        <div class="seg" role="radiogroup" aria-label="How do you want to describe the edit?">
+          <button type="button" class="seg-btn active" data-mode="settings" role="radio" aria-checked="true">Quick setup</button>
+          <button type="button" class="seg-btn" data-mode="prompt" role="radio" aria-checked="false">Full prompt</button>
+        </div>
+        <p id="mode-hint" class="muted small"></p>
+      </div>
+
+      <div class="card">
         <label class="label" for="file-clip">Upload media</label>
         <label class="drop" for="file-clip">
           <input id="file-clip" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm">
@@ -57,12 +65,16 @@
       </div>
 
       <div class="card">
-        <label class="label" for="prompt">Prompt</label>
-        <textarea id="prompt" rows="4" maxlength="2000"
-          placeholder="e.g. Make a fast-paced 30 second reel with the most exciting moments"></textarea>
+        <div class="row"><label class="label" id="prompt-label" for="prompt">Prompt</label>
+          <button type="button" id="example-btn" class="chip" hidden>Use an example</button></div>
+        <textarea id="prompt" rows="4" maxlength="2000"></textarea>
+        <p id="prompt-help" class="muted small" hidden>The agent can: pick the platform, aspect ratio (9:16, 16:9, 1:1),
+          length, 720p/1080p, framing (crop, blurred background, black bars), use exact times
+          (“0:05–0:12”, “first 10 seconds”), remove silent parts, and mute or change the volume.
+          Anything else you ask for is listed as “not applied yet”.</p>
       </div>
 
-      <div class="card grid">
+      <div class="card grid" id="settings-card">
         <div>
           <label class="label" for="preset">Style / preset</label>
           <select id="preset"></select>

@@ -1,3 +1,4 @@
+[hidden] { display: none !important; }
 :root {
   --bg: #0f1115; --card: #181b22; --line: #2a2f3a; --text: #eef0f4; --muted: #9aa3b2;
   --accent: #6c8cff; --accent-2: #8f6cff; --ok: #3ccf91; --err: #ff6b6b; --warn: #f3b74f;
@@ -61,3 +62,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 @keyframes spin { to { transform: rotate(360deg); } }
 video { width: 100%; max-height: 70vh; background: #000; border-radius: 10px; margin-bottom: 10px; }
 @media (max-width: 360px) { .grid { grid-template-columns: 1fr; } }
+.seg { display: grid; grid-template-columns: 1fr 1fr; background: #0c0e12; border: 1px solid var(--line);
+  border-radius: 12px; padding: 4px; gap: 4px; }
+.seg-btn { min-height: 42px; border: 0; background: transparent; color: var(--muted); }
+.seg-btn.active { background: linear-gradient(90deg, var(--accent), var(--accent-2)); color: #fff; }
+#mode-hint { margin: 10px 2px 0; }
+.chip { min-height: 32px; padding: 4px 12px; font-size: 13px; font-weight: 500; border-radius: 99px; }
